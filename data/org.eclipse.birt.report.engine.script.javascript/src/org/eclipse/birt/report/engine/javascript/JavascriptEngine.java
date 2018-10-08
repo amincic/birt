@@ -13,14 +13,20 @@ package org.eclipse.birt.report.engine.javascript;
 
 import java.security.AccessController;
 import java.security.PrivilegedAction;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.logging.Logger;
-
 import org.eclipse.birt.core.exception.BirtException;
 import org.eclipse.birt.core.exception.CoreException;
+import org.eclipse.birt.core.framework.IConfigurationElement;
+import org.eclipse.birt.core.framework.IExtension;
+import org.eclipse.birt.core.framework.IExtensionPoint;
+import org.eclipse.birt.core.framework.IExtensionRegistry;
+import org.eclipse.birt.core.framework.Platform;
 import org.eclipse.birt.core.i18n.ResourceConstants;
 import org.eclipse.birt.core.script.CoreJavaScriptInitializer;
 import org.eclipse.birt.core.script.CoreJavaScriptWrapper;
@@ -39,353 +45,420 @@ import org.mozilla.javascript.Script;
 import org.mozilla.javascript.Scriptable;
 import org.mozilla.javascript.ScriptableObject;
 import org.mozilla.javascript.WrapFactory;
-
 import com.ibm.icu.util.TimeZone;
 import com.ibm.icu.util.ULocale;
 
 /**
  * Wraps around the Rhino Script context
- * 
  */
 public class JavascriptEngine implements IScriptEngine, IDataScriptEngine
 {
 
-	/**
-	 * for logging
-	 */
-	protected static Logger logger = Logger.getLogger( JavascriptEngine.class
-			.getName( ) );
+    //The extension constants
+    private static final String EXTENSION_POINT = "org.eclipse.birt.report.engine.script.javascript.WrapFactory";
+    private static final String ELEMENT_FACTORY = "Factory";
+    private static final String ATTRIBUTE_FACTORYCLASS = "factoryclass";
 
-	private static Script cachedScript;
+    /**
+     * for logging
+     */
+    protected static Logger logger = Logger.getLogger(JavascriptEngine.class.getName());
 
-	/**
-	 * the JavaScript Context
-	 */
-	protected Context context;
+    private static Script cachedScript;
 
-	protected ImporterTopLevel global;
-	
-	protected ScriptableObject root;
+    /**
+     * the JavaScript Context
+     */
+    protected Context context;
 
-	private Map<String, Object> propertyMap = new HashMap<String, Object>( );
+    protected ImporterTopLevel global;
 
-	private JavascriptEngineFactory factory;
+    protected ScriptableObject root;
 
-	static
-	{
-		try
-		{
-			Context context = Context.enter( );
-			cachedScript = context
-					.compileString(
-							"function writeStatus(msg) { _statusHandle.showStatus(msg); }",
-							"<inline>", 1, null );
-			context.exit( );
-		}
-		catch ( Exception e )
-		{
-			e.printStackTrace( );
-		}
-	}
+    private Map<String, Object> propertyMap = new HashMap<String, Object>();
 
-	public JavascriptEngine( JavascriptEngineFactory factory,
-			ScriptableObject root ) throws BirtException
-	{
-		this.factory = factory;
-		try
-		{
-			this.context = Context.enter( );
-			this.global = new ImporterTopLevel( );
-			this.root = root;
-			if ( root != null )
-			{
-				// can not put this object to root, because this object will
-				// cache package and classloader information.
-				// so we need rewrite this property.
-				new LazilyLoadedCtor( global, "Packages",
-						"org.mozilla.javascript.NativeJavaTopPackage", false );
-				global.exportAsJSClass( 3, global, false );
-				global.delete( "constructor" );
-				global.setPrototype( root );
-			}
-			else
-			{
-				global.initStandardObjects( context, true );
-			}
-			if ( global
-					.get(
-							org.eclipse.birt.core.script.functionservice.IScriptFunctionContext.FUNCTION_BEAN_NAME,
-							global ) == org.mozilla.javascript.UniqueTag.NOT_FOUND )
-			{
-				IScriptFunctionContext functionContext = new IScriptFunctionContext( ) {
+    private JavascriptEngineFactory factory;
 
-					public Object findProperty( String name )
-					{
-						return propertyMap.get( name );
-					}
-				};
+    private List<IJavascriptWrapper> wrappers;
 
-				Object sObj = Context.javaToJS( functionContext, global );
-				global
-						.put(
-								org.eclipse.birt.core.script.functionservice.IScriptFunctionContext.FUNCTION_BEAN_NAME,
-								global, sObj );
-			}
-			initWrapFactory( );
-		}
-		catch ( Exception ex )
-		{
-			Context.exit( );
-			throw new BirtException( );
-		}
-	}
+    static
+    {
+        try
+        {
+            Context context = Context.enter();
+            cachedScript = context
+                .compileString(
+                    "function writeStatus(msg) { _statusHandle.showStatus(msg); }",
+                    "<inline>", 1, null);
+            context.exit();
+        }
+        catch (Exception e)
+        {
+            e.printStackTrace();
+        }
+    }
 
-	private void initWrapFactory( )
-	{
-		WrapFactory wrapFactory = new WrapFactory( ) {
+    public JavascriptEngine(JavascriptEngineFactory factory,
+        ScriptableObject root) throws BirtException
+    {
+        this.factory = factory;
+        try
+        {
+            this.context = Context.enter();
+            this.global = new ImporterTopLevel();
+            this.root = root;
+            if (root != null)
+            {
+                // can not put this object to root, because this object will
+                // cache package and classloader information.
+                // so we need rewrite this property.
+                new LazilyLoadedCtor(global, "Packages",
+                    "org.mozilla.javascript.NativeJavaTopPackage", false);
+                global.exportAsJSClass(3, global, false);
+                global.delete("constructor");
+                global.setPrototype(root);
+            }
+            else
+            {
+                global.initStandardObjects(context, true);
+            }
+            if (global
+                .get(
+                    org.eclipse.birt.core.script.functionservice.IScriptFunctionContext.FUNCTION_BEAN_NAME,
+                    global) == org.mozilla.javascript.UniqueTag.NOT_FOUND)
+            {
+                IScriptFunctionContext functionContext = new IScriptFunctionContext()
+                {
 
-			protected IJavascriptWrapper coreWrapper = new CoreJavaScriptWrapper( );
+                    public Object findProperty(String name)
+                    {
+                        return propertyMap.get(name);
+                    }
+                };
 
-			/**
-			 * wrapper an java object to javascript object.
-			 */
-			public Object wrap( Context cx, Scriptable scope, Object obj,
-					Class staticType )
-			{
-				Object object = coreWrapper.wrap( cx, scope, obj, staticType );
-				if ( object != obj )
-				{
-					return object;
-				}
-				return super.wrap( cx, scope, obj, staticType );
-			}
-		};
-		context.setWrapFactory( wrapFactory );
-		new CoreJavaScriptInitializer( ).initialize( context, global );
-	}
+                Object sObj = Context.javaToJS(functionContext, global);
+                global
+                    .put(
+                        org.eclipse.birt.core.script.functionservice.IScriptFunctionContext.FUNCTION_BEAN_NAME,
+                        global, sObj);
+            }
+            initWrapFactory();
+        }
+        catch (Exception ex)
+        {
+            Context.exit();
+            throw new BirtException();
+        }
+    }
 
-	public void setTimeZone( TimeZone zone )
-	{
-		propertyMap.put( IScriptFunctionContext.TIMEZONE, zone );
-	}
+    private void initWrappers()
+    {
+        if (wrappers != null)
+        {
+            return;
+        }
+        wrappers = new ArrayList<IJavascriptWrapper>();
+        wrappers.add(new CoreJavaScriptWrapper());
 
-	public void setLocale( Locale locale )
-	{
-		context.setLocale( locale );
-		propertyMap.put( IScriptFunctionContext.LOCALE, ULocale
-				.forLocale( locale ) );
-	}
+        //Find the extension point.
+        IExtensionRegistry extReg = Platform.getExtensionRegistry();
+        IExtensionPoint extPoint = extReg.getExtensionPoint(EXTENSION_POINT);
+        if (extPoint == null)
+            return;
+        //Fetch all extensions
+        IExtension[] exts = extPoint.getExtensions();
+        if (exts == null)
+            return;
+        //populate category map as per extension.
+        for (int e = 0; e < exts.length; e++)
+        {
+            try
+            {
+                IConfigurationElement[] configElems = exts[e].getConfigurationElements();
+                if (configElems == null)
+                    continue;
+                for (int i = 0; i < configElems.length; i++)
+                {
+                    // for element Factory
+                    if (configElems[i].getName().equals(ELEMENT_FACTORY) && configElems[i].getAttribute(ATTRIBUTE_FACTORYCLASS) != null)
+                    {
+                        IJavascriptWrapper factory = (IJavascriptWrapper) configElems[i].createExecutableExtension(ATTRIBUTE_FACTORYCLASS);
+                        wrappers.add(factory);
+                    }
+                }
+            }
+            catch (BirtException ex)
+            {
+            }
+        }
+    }
 
-	public String getScriptLanguage( )
-	{
-		return JavascriptEngineFactory.SCRIPT_JAVASCRIPT;
-	}
+    private void initWrapFactory()
+    {
+        initWrappers();
 
-	/**
-	 * exit the scripting context
-	 */
-	public void close( )
-	{
-		if ( root != null )
-		{
-			factory.releaseRootScope( root );
-			root = null;
-		}
-		if ( context != null )
-		{
-			Context.exit( );
-			context = null;
-		}
-	}
+        WrapFactory wrapFactory = new WrapFactory()
+        {
 
-	/**
-	 * creates a new scripting scope
-	 */
-	private Scriptable createJsScope( Scriptable parent, Object object )
-	{
-		Scriptable jsScope = null;
-		if ( object != null )
-		{
-			if ( !( object instanceof Scriptable ) )
-			{
-				object = javaToJs( parent, object );
-			}
-		}
-		if ( object instanceof Scriptable )
-		{
-			jsScope = new NativeObject( );
-			jsScope.setPrototype( (Scriptable) object );
-		}
-		else
-		{
-			jsScope = context.newObject( parent );
-		}
-		jsScope.setParentScope( parent );
-		return jsScope;
-	}
+            protected IJavascriptWrapper coreWrapper = new CoreJavaScriptWrapper();
 
-	public JavascriptEngineFactory getFactory( )
-	{
-		return factory;
-	}
+            /**
+             * wrapper an java object to javascript object.
+             */
+            public Object wrap(Context cx, Scriptable scope, Object obj,
+                Class staticType)
+            {
+                for (IJavascriptWrapper wrapper : wrappers)
+                {
+                    Object object = wrapper.wrap(cx, scope, obj, staticType);
+                    if (object != obj)
+                    {
+                        return object;
+                    }
+                }
+                return super.wrap(cx, scope, obj, staticType);
+            }
+        };
+        context.setWrapFactory(wrapFactory);
+        new CoreJavaScriptInitializer().initialize(context, global);
+    }
 
-	public CompiledJavascript compile( ScriptContext scriptContext,
-			final String id, final int lineNumber, final String script ) throws BirtException
-	{
-		Script scriptObject = AccessController
-				.doPrivileged( new PrivilegedAction<Script>( ) {
+    public void setTimeZone(TimeZone zone)
+    {
+        propertyMap.put(IScriptFunctionContext.TIMEZONE, zone);
+    }
 
-					public Script run( )
-					{
-						return context.compileString( script, id, lineNumber,
-								ScriptUtil.getSecurityDomain( id ) );
-					}
-				} );
-		return new CompiledJavascript( id, lineNumber, script, scriptObject );
-	}
+    public void setLocale(Locale locale)
+    {
+        context.setLocale(locale);
+        propertyMap.put(IScriptFunctionContext.LOCALE, ULocale
+            .forLocale(locale));
+    }
 
-	private JavascriptContext createJsContext( ScriptContext context )
-	{
-		ScriptContext parent = context.getParent( );
-		Scriptable parentJsScope = global;
-		if ( parent != null )
-		{
-			JavascriptContext parentJsContext = (JavascriptContext) parent
-					.getScriptContext( JavascriptEngineFactory.SCRIPT_JAVASCRIPT );
-			if ( parentJsContext == null )
-			{
-				parentJsContext = createJsContext( parent );
-			}
-			parentJsScope = parentJsContext.getScope( );
-		}
+    public String getScriptLanguage()
+    {
+        return JavascriptEngineFactory.SCRIPT_JAVASCRIPT;
+    }
 
-		Object scope = context.getScopeObject( );
-		Scriptable jsScope = createJsScope( parentJsScope, scope );
-		JavascriptContext jsContext = new JavascriptContext( context,
-				jsScope );
-		//Register writeStatus method in root context.
-		if ( parent == null )
-		{
-			cachedScript.exec( this.context, jsScope );
-		}
-		Map<String, Object> attrs = context.getAttributes( );
-		for ( Entry<String, Object> entry : attrs.entrySet( ) )
-		{
-			jsContext.setAttribute( entry.getKey( ), entry.getValue( ) );
-		}
-		context.setScriptContext( JavascriptEngineFactory.SCRIPT_JAVASCRIPT,
-				jsContext );
-		return jsContext;
-	}
+    /**
+     * exit the scripting context
+     */
+    public void close()
+    {
+        if (root != null)
+        {
+            factory.releaseRootScope(root);
+            root = null;
+        }
+        if (context != null)
+        {
+            Context.exit();
+            context = null;
+        }
+    }
 
-	public Object evaluate( ScriptContext scriptContext,
-			ICompiledScript compiledScript ) throws BirtException
-	{
-		assert ( compiledScript instanceof CompiledJavascript );
-		// String source = ( (CompiledJavascript) compiledScript )
-		// .getScriptText( );
-		try
-		{
-			Script script = ( (CompiledJavascript) compiledScript )
-					.getCompiledScript( );
-			Object value = script.exec( context, getJSScope( scriptContext ) );
-			return jsToJava( value );
-		}
-		catch ( Throwable e )
-		{
-			// Do not include javascript source code
-			// throw new CoreException(
-			// ResourceConstants.JAVASCRIPT_COMMON_ERROR,
-			// new Object[]{source, e.getMessage( )}, e );
-			throw new CoreException( ResourceConstants.INVALID_EXPRESSION,
-					e.getMessage( ),
-					e );
-		}
-	}
+    /**
+     * creates a new scripting scope
+     */
+    private Scriptable createJsScope(Scriptable parent, Object object)
+    {
+        Scriptable jsScope = null;
+        if (object != null)
+        {
+            if (!(object instanceof Scriptable))
+            {
+                object = javaToJs(parent, object);
+            }
+        }
+        if (object instanceof Scriptable)
+        {
+            jsScope = new NativeObject();
+            jsScope.setPrototype((Scriptable) object);
+        }
+        else
+        {
+            jsScope = context.newObject(parent);
+        }
+        jsScope.setParentScope(parent);
+        return jsScope;
+    }
 
-	private Object javaToJs( Scriptable scope, Object value )
-	{
-		return Context.javaToJS( value, scope );
-	}
+    public JavascriptEngineFactory getFactory()
+    {
+        return factory;
+    }
 
-	/**
-	 * converts a JS object to a Java object
-	 * 
-	 * @param jsValue
-	 *            javascript object
-	 * @return Java object
-	 */
-	public Object jsToJava( Object jsValue )
-	{
-		return JavascriptEvalUtil.convertJavascriptValue( jsValue );
-	}
+    public CompiledJavascript compile(ScriptContext scriptContext,
+        final String id, final int lineNumber, final String script) throws BirtException
+    {
+        Script scriptObject = AccessController
+            .doPrivileged(new PrivilegedAction<Script>()
+            {
 
-	public void setApplicationClassLoader( final ClassLoader appLoader )
-	{
-		if ( appLoader == null )
-		{
-			return;
-		}
-		ClassLoader loader = appLoader;
-		try
-		{
-			appLoader.loadClass( "org.mozilla.javascript.Context" );
-		}
-		catch ( ClassNotFoundException e )
-		{
-			loader = AccessController
-					.doPrivileged( new PrivilegedAction<ClassLoader>( ) {
+                public Script run()
+                {
+                    return context.compileString(script, id, lineNumber,
+                        ScriptUtil.getSecurityDomain(id));
+                }
+            });
+        return new CompiledJavascript(id, lineNumber, script, scriptObject);
+    }
 
-						public ClassLoader run( )
-						{
-							return new RhinoClassLoaderDecoration( appLoader,
-									JavascriptEngine.class.getClassLoader( ) );
-						}
-					} );
-		}
-		context.setApplicationClassLoader( loader );
-	}
+    private JavascriptContext createJsContext(final ScriptContext context)
+    {
+        ScriptContext parent = context.getParent();
+        Scriptable parentJsScope = global;
+        if (parent != null)
+        {
+            JavascriptContext parentJsContext = (JavascriptContext) parent
+                .getScriptContext(JavascriptEngineFactory.SCRIPT_JAVASCRIPT);
+            if (parentJsContext == null)
+            {
+                parentJsContext = createJsContext(parent);
+            }
+            parentJsScope = parentJsContext.getScope();
+        }
 
-	private static class RhinoClassLoaderDecoration extends ClassLoader
-	{
+        Object scope = context.getScopeObject();
+        Scriptable jsScope = createJsScope(parentJsScope, scope);
+        JavascriptContext jsContext = new JavascriptContext(context,
+            jsScope);
+        //Register writeStatus method in root context.
+        if (parent == null)
+        {
+            cachedScript.exec(this.context, jsScope);
+            IScriptFunctionContext functionContext = new IScriptFunctionContext()
+            {
+                public Object findProperty(String name)
+                {
+                    Object ret = propertyMap.get(name);
+                    if (ret != null)
+                    {
+                        return ret;
+                    }
+                    return context.getAttributes().get(name);
+                }
+            };
+            jsScope.put(org.eclipse.birt.core.script.functionservice.IScriptFunctionContext.FUNCTION_BEAN_NAME, jsScope, Context.javaToJS(functionContext, jsScope));
+        }
+        Map<String, Object> attrs = context.getAttributes();
+        for (Entry<String, Object> entry : attrs.entrySet())
+        {
+            jsContext.setAttribute(entry.getKey(), entry.getValue());
+        }
+        context.setScriptContext(JavascriptEngineFactory.SCRIPT_JAVASCRIPT,
+            jsContext);
+        return jsContext;
+    }
 
-		private ClassLoader applicationClassLoader;
-		private ClassLoader rhinoClassLoader;
+    public Object evaluate(ScriptContext scriptContext,
+        ICompiledScript compiledScript) throws BirtException
+    {
+        assert (compiledScript instanceof CompiledJavascript);
+        // String source = ( (CompiledJavascript) compiledScript )
+        // .getScriptText( );
+        try
+        {
+            Script script = ((CompiledJavascript) compiledScript)
+                .getCompiledScript();
+            Object value = script.exec(context, getJSScope(scriptContext));
+            return jsToJava(value);
+        }
+        catch (Throwable e)
+        {
+            // Do not include javascript source code
+            // throw new CoreException(
+            // ResourceConstants.JAVASCRIPT_COMMON_ERROR,
+            // new Object[]{source, e.getMessage( )}, e );
+            throw new CoreException(ResourceConstants.INVALID_EXPRESSION,
+                e.getMessage(),
+                e);
+        }
+    }
 
-		public RhinoClassLoaderDecoration( ClassLoader applicationClassLoader,
-				ClassLoader rhinoClassLoader )
-		{
-			this.applicationClassLoader = applicationClassLoader;
-			this.rhinoClassLoader = rhinoClassLoader;
-		}
+    private Object javaToJs(Scriptable scope, Object value)
+    {
+        return Context.javaToJS(value, scope);
+    }
 
-		public Class<?> loadClass( String name ) throws ClassNotFoundException
-		{
-			try
-			{
-				return applicationClassLoader.loadClass( name );
-			}
-			catch ( ClassNotFoundException e )
-			{
-				return rhinoClassLoader.loadClass( name );
-			}
-		}
-	}
+    /**
+     * converts a JS object to a Java object
+     *
+     * @param jsValue javascript object
+     * @return Java object
+     */
+    public Object jsToJava(Object jsValue)
+    {
+        return JavascriptEvalUtil.convertJavascriptValue(jsValue);
+    }
 
-	public Context getJSContext( ScriptContext scriptContext )
-	{
-		return context;
-	}
+    public void setApplicationClassLoader(final ClassLoader appLoader)
+    {
+        if (appLoader == null)
+        {
+            return;
+        }
+        ClassLoader loader = appLoader;
+        try
+        {
+            appLoader.loadClass("org.mozilla.javascript.Context");
+        }
+        catch (ClassNotFoundException e)
+        {
+            loader = AccessController
+                .doPrivileged(new PrivilegedAction<ClassLoader>()
+                {
 
-	public Scriptable getJSScope( ScriptContext scriptContext )
-	{
-		JavascriptContext jsContext = (JavascriptContext) scriptContext
-				.getScriptContext( JavascriptEngineFactory.SCRIPT_JAVASCRIPT );
-		if ( jsContext == null )
-		{
-			jsContext = createJsContext( scriptContext );
-		}
+                    public ClassLoader run()
+                    {
+                        return new RhinoClassLoaderDecoration(appLoader,
+                            JavascriptEngine.class.getClassLoader());
+                    }
+                });
+        }
+        context.setApplicationClassLoader(loader);
+    }
 
-		return jsContext.getScope( );
-	}
+    private static class RhinoClassLoaderDecoration extends ClassLoader
+    {
+
+        private ClassLoader applicationClassLoader;
+        private ClassLoader rhinoClassLoader;
+
+        public RhinoClassLoaderDecoration(ClassLoader applicationClassLoader,
+            ClassLoader rhinoClassLoader)
+        {
+            this.applicationClassLoader = applicationClassLoader;
+            this.rhinoClassLoader = rhinoClassLoader;
+        }
+
+        public Class<?> loadClass(String name) throws ClassNotFoundException
+        {
+            try
+            {
+                return applicationClassLoader.loadClass(name);
+            }
+            catch (ClassNotFoundException e)
+            {
+                return rhinoClassLoader.loadClass(name);
+            }
+        }
+    }
+
+    public Context getJSContext(ScriptContext scriptContext)
+    {
+        return context;
+    }
+
+    public Scriptable getJSScope(ScriptContext scriptContext)
+    {
+        JavascriptContext jsContext = (JavascriptContext) scriptContext
+            .getScriptContext(JavascriptEngineFactory.SCRIPT_JAVASCRIPT);
+        if (jsContext == null)
+        {
+            jsContext = createJsContext(scriptContext);
+        }
+
+        return jsContext.getScope();
+    }
 }
